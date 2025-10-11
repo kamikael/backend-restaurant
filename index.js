@@ -22,6 +22,7 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS, // Mot de passe d'application
   },
 });
+
 // Fonction pour envoyer l'email de confirmation au client
 async function sendOrderConfirmationEmail(session) {
   try {
@@ -224,8 +225,8 @@ async function sendAdminNotification(session) {
       subject: `🔔 NOUVELLE COMMANDE - ${(session.amount_total / 100).toFixed(2)}€ - ${customerName || 'Client'}`,
       html: adminEmailHTML,
     });
-    console.log('✅ Notification envoyée à l\'admin:', process.env.ADMIN_EMAIL);
 
+    console.log('✅ Notification envoyée à l\'admin:', process.env.ADMIN_EMAIL);
   } catch (error) {
     console.error('❌ Erreur lors de l\'envoi de la notification admin:', error);
     throw error;
