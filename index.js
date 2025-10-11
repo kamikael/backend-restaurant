@@ -8,13 +8,13 @@ dotenv.config();
 const app = express();
 app.use(cors());
 
-// Pour le webhook, utiliser raw body
+// Pour le webhook, utiliser raw bodyyy
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Configuration du transporteur d'email
+// Configuration du transporteur d'emaillll
 const transporter = nodemailer.createTransport({
   service: 'gmail', // Ou 'outlook', 'yahoo', etc.
   auth: {
