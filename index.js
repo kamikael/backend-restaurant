@@ -6,21 +6,95 @@ import nodemailer from "nodemailer";
 
 dotenv.config();
 const app = express();
-app.use(cors());
 
-// Pour le webhook, utiliser raw bodyyy
-app.use('/webhook', express.raw({ type: 'application/json' }));
+// CRITIQUE: Route webhook DOIT être la toute première route, AVANT CORS et JSON
+app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  
+  console.log('📨 Webhook reçu');
+  console.log('Signature présente:', !!sig);
+  console.log('Body type:', typeof req.body);
+  console.log('Secret configuré:', !!process.env.STRIPE_WEBHOOK_SECRET);
+  
+  let event;
+
+  try {
+    // Vérifier la signature du webhook
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+    console.log('✅ Signature vérifiée avec succès');
+  } catch (err) {
+    console.error('❌ Erreur de vérification du webhook:', err.message);
+    console.error('Secret utilisé:', process.env.STRIPE_WEBHOOK_SECRET ? 'whsec_...' + process.env.STRIPE_WEBHOOK_SECRET.slice(-4) : 'NON CONFIGURÉ');
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Gérer les différents types d'événements
+  try {
+    console.log('Type d\'événement:', event.type);
+    
+    switch (event.type) {
+      case 'checkout.session.completed':
+        const session = event.data.object;
+        console.log('✅ Paiement réussi pour la session:', session.id);
+        console.log('Email client:', session.customer_details?.email);
+        console.log('Metadata:', session.metadata);
+        
+        // Récupérer les détails complets de la session
+        const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
+          expand: ['customer']
+        });
+        
+        // Envoyer l'email de confirmation au client
+        await sendOrderConfirmationEmail(fullSession);
+        
+        // Envoyer la notification à l'admin
+        await sendAdminNotification(fullSession);
+        break;
+
+      case 'payment_intent.succeeded':
+        console.log('✅ PaymentIntent réussi:', event.data.object.id);
+        break;
+
+      case 'payment_intent.payment_failed':
+        console.log('❌ Paiement échoué:', event.data.object.id);
+        break;
+
+      default:
+        console.log(`ℹ️ Événement non géré: ${event.type}`);
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    console.error('❌ Erreur lors du traitement du webhook:', error);
+    res.status(500).json({ error: 'Erreur lors du traitement' });
+  }
+});
+
+// CORS et JSON pour les autres routes (APRÈS le webhook)
+app.use(cors());
 app.use(express.json());
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Configuration du transporteur d'emaillll
+// Configuration du transporteur d'email
 const transporter = nodemailer.createTransport({
-  service: 'gmail', // Ou 'outlook', 'yahoo', etc.
+  host: 'smtp.gmail.com',
+  port: 587, // Port STARTTLS (plus fiable que 465 sur les hébergeurs)
+  secure: false, // true pour 465, false pour les autres ports
   auth: {
-    user: process.env.EMAIL_USER, // Votre email
-    pass: process.env.EMAIL_PASS, // Mot de passe d'application
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
   },
+  tls: {
+    rejectUnauthorized: false // Accepter les certificats auto-signés
+  },
+  connectionTimeout: 10000, // 10 secondes
+  greetingTimeout: 10000,
+  socketTimeout: 10000,
 });
 
 // Fonction pour envoyer l'email de confirmation au client
@@ -110,17 +184,25 @@ async function sendOrderConfirmationEmail(session) {
 
     // Envoyer l'email au client
     if (session.customer_details?.email) {
-      await transporter.sendMail({
-        from: `"Mama Food's" <${process.env.EMAIL_USER}>`,
+      const msg = {
         to: session.customer_details.email,
+        from: {
+          email: process.env.EMAIL_USER,
+          name: "Mama Food's"
+        },
         subject: `✅ Confirmation de commande - Mama Food's`,
         html: emailHTML,
-      });
+      };
+
+      await sgMail.send(msg);
       console.log('✅ Email de confirmation envoyé au client:', session.customer_details.email);
     }
 
   } catch (error) {
     console.error('❌ Erreur lors de l\'envoi de l\'email client:', error);
+    if (error.response) {
+      console.error('Détails:', error.response.body);
+    }
     throw error;
   }
 }
@@ -219,16 +301,24 @@ async function sendAdminNotification(session) {
     `;
 
     // Envoyer l'email à l'admin
-    await transporter.sendMail({
-      from: `"Mama Food's Notifications" <${process.env.EMAIL_USER}>`,
+    const msg = {
       to: process.env.ADMIN_EMAIL,
+      from: {
+        email: process.env.EMAIL_USER,
+        name: "Mama Food's Notifications"
+      },
       subject: `🔔 NOUVELLE COMMANDE - ${(session.amount_total / 100).toFixed(2)}€ - ${customerName || 'Client'}`,
       html: adminEmailHTML,
-    });
+    };
 
+    await sgMail.send(msg);
     console.log('✅ Notification envoyée à l\'admin:', process.env.ADMIN_EMAIL);
+
   } catch (error) {
     console.error('❌ Erreur lors de l\'envoi de la notification admin:', error);
+    if (error.response) {
+      console.error('Détails:', error.response.body);
+    }
     throw error;
   }
 }
@@ -284,68 +374,26 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// Webhook Stripe pour gérer les événements
-app.post('/webhook', async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  let event;
-
-  try {
-    // Vérifier la signature du webhook
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error('❌ Erreur de vérification du webhook:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // Gérer les différents types d'événements
-  try {
-    switch (event.type) {
-      case 'checkout.session.completed':
-        const session = event.data.object;
-        console.log('✅ Paiement réussi pour la session:', session.id);
-        
-        // Envoyer l'email de confirmation au client
-        await sendOrderConfirmationEmail(session);
-        
-        // Envoyer la notification à l'admin
-        await sendAdminNotification(session);
-        break;
-
-      case 'payment_intent.succeeded':
-        console.log('✅ PaymentIntent réussi:', event.data.object.id);
-        break;
-
-      case 'payment_intent.payment_failed':
-        console.log('❌ Paiement échoué:', event.data.object.id);
-        break;
-
-      default:
-        console.log(`ℹ️ Événement non géré: ${event.type}`);
-    }
-
-    res.json({ received: true });
-  } catch (error) {
-    console.error('❌ Erreur lors du traitement du webhook:', error);
-    res.status(500).json({ error: 'Erreur lors du traitement' });
-  }
-});
-
 // Route de test pour l'envoi d'email
 app.post('/test-email', async (req, res) => {
   try {
-    await transporter.sendMail({
-      from: `"Mama Food's" <${process.env.EMAIL_USER}>`,
+    const msg = {
       to: process.env.ADMIN_EMAIL,
+      from: {
+        email: process.env.EMAIL_USER,
+        name: "Mama Food's"
+      },
       subject: "Test d'envoi d'email",
-      html: "<h1>✅ Configuration email fonctionnelle !</h1>",
-    });
-    res.json({ message: 'Email de test envoyé avec succès' });
+      html: "<h1>✅ Configuration email fonctionnelle !</h1><p>SendGrid fonctionne correctement.</p>",
+    };
+
+    await sgMail.send(msg);
+    res.json({ message: 'Email de test envoyé avec succès via SendGrid' });
   } catch (error) {
     console.error('Erreur test email:', error);
+    if (error.response) {
+      console.error('Détails:', error.response.body);
+    }
     res.status(500).json({ error: error.message });
   }
 });
