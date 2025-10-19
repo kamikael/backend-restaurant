@@ -27,7 +27,7 @@ async function sendBrevoEmail({ to, subject, htmlContent }) {
   try {
     const emailData = {
       sender: { name: "Mama Food's", email: process.env.EMAIL_USER },
-      to: [{ to }],
+      to: [{ email: to }],
       subject,
       htmlContent,
     };
